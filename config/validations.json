@@ -1,0 +1,72 @@
+{
+  "validations": [
+    {
+      "name": "Control de Salud Sexual y Reproductiva",
+      "conditions": {
+        "logical_operator": "AND",
+        "rules": [
+          {
+            "lhs": {
+              "type": "prestacion",
+              "series": "A",
+              "codigo": "01010101",
+              "column_offset": 1
+            },
+            "operator": "<=",
+            "rhs": {
+              "type": "prestacion",
+              "series": "A",
+              "codigo": "01010103",
+              "column_offset_start": 1,
+              "column_offset_end": 3
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Validación con valor constante",
+      "conditions": {
+        "logical_operator": "AND",
+        "rules": [
+          {
+            "lhs": {
+              "type": "prestacion",
+              "series": "A",
+              "codigo": "01010101",
+              "column_offset": 2
+            },
+            "operator": "!=",
+            "rhs": {
+              "type": "constant",
+              "value": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+        "name": "Ejemplo de Validación Inter-Series",
+        "conditions": {
+            "logical_operator": "AND",
+            "rules": [
+                {
+                    "lhs": {
+                        "type": "prestacion",
+                        "series": "A",
+                        "codigo": "01010101",
+                        "column_offset": 1
+                    },
+                    "operator": "==",
+                    "rhs": {
+                        "type": "prestacion",
+                        "series": "BM",
+                        "codigo": "01010101",
+                        "column_offset": 1
+                    }
+                }
+            ]
+        }
+    }
+  ]
+}
