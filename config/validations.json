@@ -1,7 +1,7 @@
 {
   "validations": [
     {
-      "name": "Control de Salud Sexual y Reproductiva",
+      "name": "Validación COL04 diferente de 0 para 01010101 y 01010103",
       "conditions": {
         "logical_operator": "AND",
         "rules": [
@@ -10,31 +10,20 @@
               "type": "prestacion",
               "series": "A",
               "codigo": "01010101",
-              "column_offset": 1
+              "column_offset": 4
             },
-            "operator": "<=",
+            "operator": "!=",
             "rhs": {
+              "type": "constant",
+              "value": 0
+            }
+          },
+          {
+            "lhs": {
               "type": "prestacion",
               "series": "A",
               "codigo": "01010103",
-              "column_offset_start": 1,
-              "column_offset_end": 3
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "Validación con valor constante",
-      "conditions": {
-        "logical_operator": "AND",
-        "rules": [
-          {
-            "lhs": {
-              "type": "prestacion",
-              "series": "A",
-              "codigo": "01010101",
-              "column_offset": 2
+              "column_offset": 4
             },
             "operator": "!=",
             "rhs": {
@@ -44,29 +33,6 @@
           }
         ]
       }
-    },
-    {
-        "name": "Ejemplo de Validación Inter-Series",
-        "conditions": {
-            "logical_operator": "AND",
-            "rules": [
-                {
-                    "lhs": {
-                        "type": "prestacion",
-                        "series": "A",
-                        "codigo": "01010101",
-                        "column_offset": 1
-                    },
-                    "operator": "==",
-                    "rhs": {
-                        "type": "prestacion",
-                        "series": "BM",
-                        "codigo": "01010101",
-                        "column_offset": 1
-                    }
-                }
-            ]
-        }
     }
   ]
 }

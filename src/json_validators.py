@@ -83,10 +83,97 @@ class ValidadorJSON:
             resultado_final = any(resultados)
 
         if not resultado_final:
-            # Combinar los mensajes de las sub-reglas para el error final
-            error_message = f"Validación '{regla.get('name', 'sin nombre')}' falló: "
-            error_message += f" {operador_logico} ".join(mensajes_regla)
+            custom_message = regla.get('message')
+            if custom_message:
+                error_message = f"Validación '{regla.get('name', 'sin nombre')}' falló: {custom_message}"
+            else:
+                # Generar mensaje adaptativo
+                error_message = self._generar_mensaje_adaptativo(regla, reglas_a_verificar, operador_logico, resultados, lector_xlsm)
             self._agregar_error(error_message)
+
+    def _generar_mensaje_adaptativo(self, regla, reglas_a_verificar, operador_logico, resultados_comparacion, lector_xlsm):
+        nombre_regla = regla.get('name', 'sin nombre')
+        
+        # Recopilar información detallada de cada sub-regla
+        detalles_sub_reglas = []
+        for i, sub_regla in enumerate(reglas_a_verificar):
+            info_lhs = self._obtener_valor(sub_regla["lhs"], lector_xlsm)
+            info_rhs = self._obtener_valor(sub_regla["rhs"], lector_xlsm)
+            operador = sub_regla["operator"]
+            op_texto = self._obtener_texto_operador(operador)
+
+            if info_lhs is None or info_rhs is None:
+                # If values are missing, we can't form a complete message, but we can note it.
+                # This case should ideally be handled earlier in _evaluar_regla, but as a safeguard
+                continue
+            
+            rhs_type = sub_regla["rhs"].get("type")
+            rhs_text = info_rhs["texto_prestacion"] if rhs_type != "constant" else str(info_rhs["valor"])
+
+            detalles_sub_reglas.append({
+                "lhs_texto": info_lhs["texto_prestacion"],
+                "lhs_columna": info_lhs["columna_formateada"],
+                "rhs_texto": rhs_text,
+                "rhs_valor": info_rhs["valor"],
+                "rhs_type": rhs_type,
+                "operator": operador,
+                "op_texto": op_texto,
+                "resultado": resultados_comparacion[i] if i < len(resultados_comparacion) else False
+            })
+        
+        if len(detalles_sub_reglas) > 1 and all(d["operator"] == detalles_sub_reglas[0]["operator"] and d["rhs_type"] == detalles_sub_reglas[0]["rhs_type"] and d["rhs_valor"] == detalles_sub_reglas[0]["rhs_valor"] for d in detalles_sub_reglas):
+            
+            # Extract just the column letter for comparison to group by actual Excel column
+            all_excel_cols = [d["lhs_columna"].split(',')[1].strip().split(':')[1].strip()[0] if 'Celda' in d["lhs_columna"] else d["lhs_columna"].split(',')[1].strip().split(':')[1].strip().split(' ')[0][0] for d in detalles_sub_reglas]
+            unique_excel_cols = list(set(all_excel_cols))
+
+            # Use "y" for AND, "o" for OR in the combined message
+            join_word = " y " if operador_logico == "AND" else " o "
+
+            if len(unique_excel_cols) == 1: # All LHS are in the same Excel column (e.g., F11 and F12 are both in column F)
+                prestaciones_texto = []
+                for detalle in detalles_sub_reglas:
+                    prestaciones_texto.append(f"'{detalle['lhs_texto']}' ({detalle['lhs_columna'].split(',')[1].strip()})")
+                
+                combined_lhs_text = join_word.join(prestaciones_texto)
+                
+                common_op_text = detalles_sub_reglas[0]["op_texto"]
+                common_rhs_text = detalles_sub_reglas[0]["rhs_texto"]
+                common_sheet = detalles_sub_reglas[0]["lhs_columna"].split(',')[0].strip() # Extract sheet name
+
+                return (
+                    f"{common_sheet}, {combined_lhs_text} "
+                    f"deben ser {common_op_text} {common_rhs_text}."
+                )
+            else: # LHS columns are different, list them individually
+                mensajes_individuales = []
+                for detalle in detalles_sub_reglas:
+                    mensajes_individuales.append(
+                        f"'{detalle['lhs_texto']}' ({detalle['lhs_columna']}) "
+                        f"debe ser {detalle['op_texto']} {detalle['rhs_texto']}"
+                    )
+                return f"Validación '{nombre_regla}' falló: {f' {join_word} '.join(mensajes_individuales)}."
+
+        # Si no se pueden agrupar o es una sola regla, generar mensajes individuales
+        mensajes_regla_fallida = []
+        for detalle in detalles_sub_reglas:
+            if not detalle["resultado"]: # Only include messages for rules that failed
+                if detalle["rhs_type"] == "constant":
+                    mensaje_sub_regla = (
+                        f"'{detalle['lhs_texto']}' ({detalle['lhs_columna']}) "
+                        f"debe ser {detalle['op_texto']} {detalle['rhs_valor']}."
+                    )
+                else:
+                    mensaje_sub_regla = (
+                        f"'{detalle['lhs_texto']}' ({detalle['lhs_columna']}) "
+                        f"debe ser {detalle['op_texto']} '{detalle['rhs_texto']}' ({detalle['lhs_columna']})."
+                    )
+                mensajes_regla_fallida.append(mensaje_sub_regla)
+        
+        if mensajes_regla_fallida:
+            return f"Validación '{nombre_regla}' falló: {f' {join_word} '.join(mensajes_regla_fallida)}"
+        else:
+            return f"Validación '{nombre_regla}' falló." # Should not happen if result_final is False
 
     def _obtener_valor(self, operando, lector_xlsm):
         tipo_operando = operando.get("type")
@@ -125,8 +212,8 @@ class ValidadorJSON:
                 valor_celda = lector_xlsm.obtener_valor_celda(nombre_hoja, fila, letra_col=letra_col)
                 return {
                     "valor": valor_celda,
-                    "texto_prestacion": info_prestacion["TextoPrestacion"],
-                    "columna_formateada": f"Columna {letra_col}"
+                    "texto_prestacion": info_prestacion["TextoPrestacion"].strip(), # Remove extra spaces
+                    "columna_formateada": f"Hoja: {nombre_hoja}, Celda: {letra_col}{fila}"
                 }
             
             elif "column_offset_start" in operando and "column_offset_end" in operando:
@@ -143,19 +230,19 @@ class ValidadorJSON:
                     if isinstance(valor, (int, float)):
                         total += valor
                 
-                columna_formateada = ""
+                rango_formateado = ""
                 if len(letras_columnas) == 1:
-                    columna_formateada = f"Columna {letras_columnas[0]}"
+                    rango_formateado = f"Celda: {letras_columnas[0]}{fila}"
                 elif len(letras_columnas) > 1:
-                    columna_formateada = f"Columnas {letras_columnas[0]} a {letras_columnas[-1]}"
+                    rango_formateado = f"Rango: {letras_columnas[0]}{fila} a {letras_columnas[-1]}{fila}"
 
                 return {
                     "valor": total,
-                    "texto_prestacion": info_prestacion["TextoPrestacion"],
-                    "columna_formateada": columna_formateada
+                    "texto_prestacion": info_prestacion["TextoPrestacion"].strip(), # Remove extra spaces
+                    "columna_formateada": f"Hoja: {nombre_hoja}, {rango_formateado}"
                 }
         
-        return {"valor": None, "texto_prestacion": info_prestacion["TextoPrestacion"], "columna_formateada": ""}
+        return {"valor": None, "texto_prestacion": info_prestacion["TextoPrestacion"].strip() if info_prestacion and "TextoPrestacion" in info_prestacion else "", "columna_formateada": ""}
 
     def _realizar_comparacion(self, lhs, op, rhs):
         mapa_op = {
