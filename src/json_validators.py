@@ -1,11 +1,11 @@
 import json
 import pandas as pd
-from src.glosa_parser import LectorGlosa
+from src.glosa_parser import LectorGlosaMDB
 from src.xlsm_parser import LectorXLSM
 from src.utils import columna_a_letra_excel
 
 class ValidadorJSON:
-    def __init__(self, ruta_archivo_json, lector_glosa: LectorGlosa, archivos_disponibles: dict):
+    def __init__(self, ruta_archivo_json, lector_glosa: LectorGlosaMDB, archivos_disponibles: dict):
         self.reglas = self._cargar_reglas(ruta_archivo_json)
         self.lector_glosa = lector_glosa
         self.archivos_disponibles = archivos_disponibles
@@ -25,56 +25,71 @@ class ValidadorJSON:
 
     def validar(self, lector_xlsm: LectorXLSM):
         self.errores = []
+        current_file_series = lector_xlsm.serie
+
         for regla in self.reglas:
-            self._evaluar_regla(regla, lector_xlsm)
+            target_series = regla.get("target_series")
+
+            # Check if the rule applies to the current file's series
+            if target_series:
+                if isinstance(target_series, str):
+                    if current_file_series != target_series:
+                        continue # Skip rule if it doesn't match the current file's series
+                elif isinstance(target_series, list):
+                    if current_file_series not in target_series:
+                        continue # Skip rule if it doesn't match any of the target series
+            
+            self._evaluar_regla_individual(regla, lector_xlsm)
         return not self.errores
 
-    def _evaluar_regla(self, regla, lector_xlsm):
+    def _evaluar_regla_individual(self, regla, lector_xlsm):
         condiciones = regla.get("conditions", {})
         reglas_a_verificar = condiciones.get("rules", [])
         operador_logico = condiciones.get("logical_operator", "AND").upper()
 
         # Lógica para validación inter-series
+        # This logic should still apply for inter-series rules, regardless of target_series
         series_en_regla = {sub_regla[lado].get("series") for sub_regla in reglas_a_verificar for lado in ["lhs", "rhs"] if "series" in sub_regla[lado]}
-        if len(series_en_regla) > 1:
+        
+        # Filter out None from series_en_regla, as it might come from rules without explicit series
+        series_en_regla = {s for s in series_en_regla if s is not None}
+
+        if len(series_en_regla) > 1: # This indicates an inter-series rule
             clave_archivo = (lector_xlsm.codigo_establecimiento, lector_xlsm.mes)
             series_disponibles = self.archivos_disponibles.get(clave_archivo, [])
+            
+            # Check if all series mentioned in the rule are available among the processed files
             if not series_en_regla.issubset(set(series_disponibles)):
                 print(f"Omitiendo regla inter-series '{regla.get('name')}' porque no todos los archivos de series requeridos están presentes para {clave_archivo}.")
                 return
 
         resultados = []
-        mensajes_regla = []
+        # Collect missing value errors separately to avoid redundancy
+        missing_value_errors = []
+
         for sub_regla in reglas_a_verificar:
             info_lhs = self._obtener_valor(sub_regla["lhs"], lector_xlsm)
             info_rhs = self._obtener_valor(sub_regla["rhs"], lector_xlsm)
             operador = sub_regla["operator"]
 
-            if info_lhs["valor"] is None or info_rhs["valor"] is None:
+            # Check for missing values and add concise error messages
+            if info_lhs["valor"] is None:
+                missing_value_errors.append(f"Valor no encontrado para '{info_lhs['texto_prestacion']}' en {info_lhs['columna_formateada']}.")
                 resultados.append(False)
-                # If values are missing, we can't form a complete message, but we can note it.
-                if info_lhs["valor"] is None:
-                    mensajes_regla.append(f"Valor no encontrado para '{info_lhs['texto_prestacion']}' en {info_lhs['columna_formateada']}.")
-                if info_rhs["valor"] is None:
-                    mensajes_regla.append(f"Valor no encontrado para '{info_rhs['texto_prestacion']}' en {info_rhs['columna_formateada']}.")
-                continue
+            if info_rhs["valor"] is None:
+                missing_value_errors.append(f"Valor no encontrado para '{info_rhs['texto_prestacion']}' en {info_rhs['columna_formateada']}.")
+                resultados.append(False)
+            
+            if info_lhs["valor"] is None or info_rhs["valor"] is None:
+                continue # Skip comparison if values are missing
 
             resultado = self._realizar_comparacion(info_lhs["valor"], operador, info_rhs["valor"])
             resultados.append(resultado)
 
-            # Construir el mensaje de la sub-regla
-            op_texto = self._obtener_texto_operador(operador)
-            if sub_regla["rhs"].get("type") == "constant":
-                mensaje_sub_regla = (
-                    f"'{info_lhs['texto_prestacion']}' ({info_lhs['columna_formateada']}) "
-                    f"debe ser {op_texto} {info_rhs['valor']}."
-                )
-            else:
-                mensaje_sub_regla = (
-                    f"'{info_lhs['texto_prestacion']}' ({info_lhs['columna_formateada']}) "
-                    f"debe ser {op_texto} '{info_rhs['texto_prestacion']}' ({info_rhs['columna_formateada']})."
-                )
-            mensajes_regla.append(mensaje_sub_regla)
+        # Add collected missing value errors to self.errores
+        # Only add unique missing value errors
+        for error_msg in list(set(missing_value_errors)):
+            self._agregar_error(f"Validación '{regla.get('name', 'sin nombre')}' falló: {error_msg}")
 
         resultado_final = False
         if operador_logico == "AND":
@@ -82,98 +97,83 @@ class ValidadorJSON:
         elif operador_logico == "OR":
             resultado_final = any(resultados)
 
-        if not resultado_final:
+        # Only generate the main failure message if there are actual comparison failures
+        # and no specific missing value errors have already covered the failure.
+        # Also, avoid adding a generic "falló" message if specific messages are already present.
+        if not resultado_final and not missing_value_errors:
             custom_message = regla.get('message')
             if custom_message:
                 error_message = f"Validación '{regla.get('name', 'sin nombre')}' falló: {custom_message}"
             else:
-                # Generar mensaje adaptativo
                 error_message = self._generar_mensaje_adaptativo(regla, reglas_a_verificar, operador_logico, resultados, lector_xlsm)
             self._agregar_error(error_message)
+        elif not resultado_final and not any(resultados) and not missing_value_errors: # If all rules failed and no specific messages were generated
+            self._agregar_error(f"Validación '{regla.get('name', 'sin nombre')}' falló.")
+
+        # Removed redundant code block
 
     def _generar_mensaje_adaptativo(self, regla, reglas_a_verificar, operador_logico, resultados_comparacion, lector_xlsm):
         nombre_regla = regla.get('name', 'sin nombre')
-        
-        # Recopilar información detallada de cada sub-regla
-        detalles_sub_reglas = []
+        join_word = " y " if operador_logico == "AND" else " o " # Initialize join_word
+
+        mensajes_fallidos_concisos = []
         for i, sub_regla in enumerate(reglas_a_verificar):
-            info_lhs = self._obtener_valor(sub_regla["lhs"], lector_xlsm)
-            info_rhs = self._obtener_valor(sub_regla["rhs"], lector_xlsm)
-            operador = sub_regla["operator"]
-            op_texto = self._obtener_texto_operador(operador)
+            if not resultados_comparacion[i]: # Solo generar mensaje para reglas que fallaron
+                info_lhs = self._obtener_valor(sub_regla["lhs"], lector_xlsm)
+                info_rhs = self._obtener_valor(sub_regla["rhs"], lector_xlsm)
+                operador = sub_regla["operator"]
+                op_texto = self._obtener_texto_operador(operador)
 
-            if info_lhs is None or info_rhs is None:
-                # If values are missing, we can't form a complete message, but we can note it.
-                # This case should ideally be handled earlier in _evaluar_regla, but as a safeguard
-                continue
-            
-            rhs_type = sub_regla["rhs"].get("type")
-            rhs_text = info_rhs["texto_prestacion"] if rhs_type != "constant" else str(info_rhs["valor"])
-
-            detalles_sub_reglas.append({
-                "lhs_texto": info_lhs["texto_prestacion"],
-                "lhs_columna": info_lhs["columna_formateada"],
-                "rhs_texto": rhs_text,
-                "rhs_valor": info_rhs["valor"],
-                "rhs_type": rhs_type,
-                "operator": operador,
-                "op_texto": op_texto,
-                "resultado": resultados_comparacion[i] if i < len(resultados_comparacion) else False
-            })
-        
-        if len(detalles_sub_reglas) > 1 and all(d["operator"] == detalles_sub_reglas[0]["operator"] and d["rhs_type"] == detalles_sub_reglas[0]["rhs_type"] and d["rhs_valor"] == detalles_sub_reglas[0]["rhs_valor"] for d in detalles_sub_reglas):
-            
-            # Extract just the column letter for comparison to group by actual Excel column
-            all_excel_cols = [d["lhs_columna"].split(',')[1].strip().split(':')[1].strip()[0] if 'Celda' in d["lhs_columna"] else d["lhs_columna"].split(',')[1].strip().split(':')[1].strip().split(' ')[0][0] for d in detalles_sub_reglas]
-            unique_excel_cols = list(set(all_excel_cols))
-
-            # Use "y" for AND, "o" for OR in the combined message
-            join_word = " y " if operador_logico == "AND" else " o "
-
-            if len(unique_excel_cols) == 1: # All LHS are in the same Excel column (e.g., F11 and F12 are both in column F)
-                prestaciones_texto = []
-                for detalle in detalles_sub_reglas:
-                    prestaciones_texto.append(f"'{detalle['lhs_texto']}' ({detalle['lhs_columna'].split(',')[1].strip()})")
+                lhs_display = info_lhs["texto_prestacion"]
+                rhs_display = info_rhs["texto_prestacion"] if sub_regla["rhs"].get("type") != "constant" else str(info_rhs["valor"])
                 
-                combined_lhs_text = join_word.join(prestaciones_texto)
+                # Simplificar la referencia a la columna, mostrando solo la celda o rango
+                # Extract series, sheet, and cell/range for LHS
+                lhs_serie = sub_regla["lhs"].get("series", lector_xlsm.serie)
+                lhs_col_info = info_lhs["columna_formateada"]
+                lhs_hoja = "N/A"
+                lhs_celda_o_rango = "N/A"
+
+                if "Hoja: " in lhs_col_info:
+                    parts = lhs_col_info.split(", ")
+                    for part in parts:
+                        if part.startswith("Hoja: "):
+                            lhs_hoja = part.replace("Hoja: ", "")
+                        elif part.startswith("Celda: ") or part.startswith("Rango: "):
+                            lhs_celda_o_rango = part.replace("Celda: ", "").replace("Rango: ", "")
                 
-                common_op_text = detalles_sub_reglas[0]["op_texto"]
-                common_rhs_text = detalles_sub_reglas[0]["rhs_texto"]
-                common_sheet = detalles_sub_reglas[0]["lhs_columna"].split(',')[0].strip() # Extract sheet name
+                lhs_full_ref = f"Serie: {lhs_serie}, Hoja: {lhs_hoja}, Celda: {lhs_celda_o_rango}"
 
-                return (
-                    f"{common_sheet}, {combined_lhs_text} "
-                    f"deben ser {common_op_text} {common_rhs_text}."
-                )
-            else: # LHS columns are different, list them individually
-                mensajes_individuales = []
-                for detalle in detalles_sub_reglas:
-                    mensajes_individuales.append(
-                        f"'{detalle['lhs_texto']}' ({detalle['lhs_columna']}) "
-                        f"debe ser {detalle['op_texto']} {detalle['rhs_texto']}"
-                    )
-                return f"Validación '{nombre_regla}' falló: {f' {join_word} '.join(mensajes_individuales)}."
+                # Extract series, sheet, and cell/range for RHS
+                rhs_serie = sub_regla["rhs"].get("series", lector_xlsm.serie)
+                rhs_col_info = info_rhs["columna_formateada"]
+                rhs_hoja = "N/A"
+                rhs_celda_o_rango = "N/A"
 
-        # Si no se pueden agrupar o es una sola regla, generar mensajes individuales
-        mensajes_regla_fallida = []
-        for detalle in detalles_sub_reglas:
-            if not detalle["resultado"]: # Only include messages for rules that failed
-                if detalle["rhs_type"] == "constant":
-                    mensaje_sub_regla = (
-                        f"'{detalle['lhs_texto']}' ({detalle['lhs_columna']}) "
-                        f"debe ser {detalle['op_texto']} {detalle['rhs_valor']}."
+                if "Hoja: " in rhs_col_info:
+                    parts = rhs_col_info.split(", ")
+                    for part in parts:
+                        if part.startswith("Hoja: "):
+                            rhs_hoja = part.replace("Hoja: ", "")
+                        elif part.startswith("Celda: ") or part.startswith("Rango: "):
+                            rhs_celda_o_rango = part.replace("Celda: ", "").replace("Rango: ", "")
+                
+                rhs_full_ref = f"Serie: {rhs_serie}, Hoja: {rhs_hoja}, Celda: {rhs_celda_o_rango}"
+
+                if sub_regla["rhs"].get("type") == "constant":
+                    mensajes_fallidos_concisos.append(
+                        f"'{lhs_display}' ({lhs_full_ref}) debe ser {op_texto} {rhs_display} (actual: {info_lhs['valor']})."
                     )
                 else:
-                    mensaje_sub_regla = (
-                        f"'{detalle['lhs_texto']}' ({detalle['lhs_columna']}) "
-                        f"debe ser {detalle['op_texto']} '{detalle['rhs_texto']}' ({detalle['lhs_columna']})."
+                    mensajes_fallidos_concisos.append(
+                        f"'{lhs_display}' ({lhs_full_ref}) debe ser {op_texto} '{rhs_display}' ({rhs_full_ref}) (actual: {info_lhs['valor']} vs {info_rhs['valor']})."
                     )
-                mensajes_regla_fallida.append(mensaje_sub_regla)
         
-        if mensajes_regla_fallida:
-            return f"Validación '{nombre_regla}' falló: {f' {join_word} '.join(mensajes_regla_fallida)}"
+        if mensajes_fallidos_concisos:
+            # Combine messages for a single rule into a more readable format
+            return f"Validación '{nombre_regla}' falló: {join_word.join(mensajes_fallidos_concisos)}"
         else:
-            return f"Validación '{nombre_regla}' falló." # Should not happen if result_final is False
+            return f"Validación '{nombre_regla}' falló." # Fallback, should not be reached if results_comparacion is accurate
 
     def _obtener_valor(self, operando, lector_xlsm):
         tipo_operando = operando.get("type")
@@ -197,6 +197,7 @@ class ValidadorJSON:
                     "columna_formateada": "N/A"
                 }
 
+            # Access columns using lowercase names
             nombre_hoja = info_prestacion["hoja"]
             fila = info_prestacion["linea"]
             
@@ -204,15 +205,20 @@ class ValidadorJSON:
                 indice_col_inicio = int(info_prestacion["inicio"])
             except (ValueError, TypeError):
                 print(f"Advertencia: Valor 'inicio' inválido para CodigoPrestacion '{codigo}': {info_prestacion['inicio']}")
-                return None
+                return {
+                    "valor": None,
+                    "texto_prestacion": info_prestacion["textoprestacion"].strip() if info_prestacion and "textoprestacion" in info_prestacion else f"Prestación '{codigo}' (Serie {serie})",
+                    "columna_formateada": "N/A"
+                }
 
             if "column_offset" in operando:
                 indice_col = indice_col_inicio + operando["column_offset"]
                 letra_col = columna_a_letra_excel(indice_col)
+                
                 valor_celda = lector_xlsm.obtener_valor_celda(nombre_hoja, fila, letra_col=letra_col)
                 return {
                     "valor": valor_celda,
-                    "texto_prestacion": info_prestacion["TextoPrestacion"].strip(), # Remove extra spaces
+                    "texto_prestacion": info_prestacion["textoprestacion"].strip(), # Remove extra spaces
                     "columna_formateada": f"Hoja: {nombre_hoja}, Celda: {letra_col}{fila}"
                 }
             
@@ -222,6 +228,7 @@ class ValidadorJSON:
                 
                 total = 0
                 letras_columnas = []
+                
                 for offset in range(offset_inicio, offset_fin + 1):
                     indice_col = indice_col_inicio + offset
                     letra_col = columna_a_letra_excel(indice_col)
@@ -238,11 +245,11 @@ class ValidadorJSON:
 
                 return {
                     "valor": total,
-                    "texto_prestacion": info_prestacion["TextoPrestacion"].strip(), # Remove extra spaces
+                    "texto_prestacion": info_prestacion["textoprestacion"].strip(), # Remove extra spaces
                     "columna_formateada": f"Hoja: {nombre_hoja}, {rango_formateado}"
                 }
         
-        return {"valor": None, "texto_prestacion": info_prestacion["TextoPrestacion"].strip() if info_prestacion and "TextoPrestacion" in info_prestacion else "", "columna_formateada": ""}
+        return {"valor": None, "texto_prestacion": info_prestacion["textoprestacion"].strip() if info_prestacion and "textoprestacion" in info_prestacion else "", "columna_formateada": ""}
 
     def _realizar_comparacion(self, lhs, op, rhs):
         mapa_op = {
@@ -272,15 +279,23 @@ class ValidadorJSON:
 
 if __name__ == "__main__":
     import os
-    glosa_path = os.path.join('..', 'glosa')
-    lector_glosa = LectorGlosa(glosa_path)
-    lector_glosa.cargar_todas_glosas()
+    # For local testing, assume a dummy Global.mdb path and year
+    directorio_actual = os.path.dirname(__file__)
+    ruta_mdb_global_test = os.path.join(directorio_actual, '..', 'Global.mdb') # Adjust if Global.mdb is elsewhere
+    test_year = 2025 # Example year for testing
 
-    xlsm_file_path = os.path.join('..', 'original', '116322A05.xlsm')
+    lector_glosa_mdb_test = LectorGlosaMDB(ruta_mdb_global_test, test_year)
+
+    xlsm_file_path = os.path.join('..', 'original', '116322A05.xlsm') # Example XLSM file
     lector_xlsm = LectorXLSM(xlsm_file_path)
     lector_xlsm.cargar_libro()
 
-    validador_json = ValidadorJSON('config/validations.json', lector_glosa)
+    # Dummy archivos_disponibles for testing purposes
+    archivos_disponibles_test = {
+        (lector_xlsm.codigo_establecimiento, lector_xlsm.mes): [lector_xlsm.serie]
+    }
+
+    validador_json = ValidadorJSON('config/validations.json', lector_glosa_mdb_test, archivos_disponibles_test)
     
     if validador_json.validar(lector_xlsm):
         print("Todas las validaciones JSON pasaron.")

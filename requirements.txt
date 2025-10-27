@@ -1,3 +1,7 @@
-openpyxl
 pandas
+openpyxl
 xlrd
+pyodbc
+SQLAlchemy
+sqlalchemy-access
+PyQt6

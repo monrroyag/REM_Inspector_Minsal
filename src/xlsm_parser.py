@@ -59,8 +59,12 @@ class LectorXLSM:
                 raise ValueError("Se debe proporcionar 'letra_col' o 'indice_col'.")
             
             celda = hoja[direccion_celda]
-            return celda.value
-        return None
+            valor = celda.value
+            # If the value is None or an empty string, treat it as 0 for numerical contexts
+            if valor is None or (isinstance(valor, str) and valor.strip() == ''):
+                return 0
+            return valor
+        return 0 # Return 0 if sheet or cell not found, assuming numerical context
 
     def obtener_valores_rango(self, nombre_hoja, celda_inicio, celda_fin):
         """

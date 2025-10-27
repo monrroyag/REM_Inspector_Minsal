@@ -2,6 +2,7 @@
   "validations": [
     {
       "name": "Validación COL04 diferente de 0 para 01010101 y 01010103",
+      "target_series": "A",
       "conditions": {
         "logical_operator": "AND",
         "rules": [
@@ -29,6 +30,30 @@
             "rhs": {
               "type": "constant",
               "value": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Validación Serie A 29000031 COL1 <= Serie BM 80401151 COL01",
+      "target_series": ["A", "BM"],
+      "conditions": {
+        "logical_operator": "AND",
+        "rules": [
+          {
+            "lhs": {
+              "type": "prestacion",
+              "series": "A",
+              "codigo": "29000031",
+              "column_offset": 1
+            },
+            "operator": "<=",
+            "rhs": {
+              "type": "prestacion",
+              "series": "BM",
+              "codigo": "80401151",
+              "column_offset": 1
             }
           }
         ]
